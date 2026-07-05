@@ -5,175 +5,156 @@
 #include "HashTable.h"
 #include "HashFunction.h"
 
-/* ------------------------------------------------------------
- * Création / destruction
- * ------------------------------------------------------------ */
-
+/* ─────────────────────────────────────────────────────────────
+ *  Création de la HashTable
+ *  Utilise le vrai DynamicArray du Membre 1
+ * ───────────────────────────────────────────────────────────── */
 HashTable *hashtable_create(size_t capacity)
 {
     HashTable *table = malloc(sizeof(HashTable));
     if (!table) return NULL;
 
-    table->array = malloc(sizeof(DynamicArray));
+    /* Utilise dynamic_array_create du Membre 1 */
+    table->array = dynamic_array_create(capacity);
     if (!table->array)
     {
         free(table);
         return NULL;
     }
 
-    table->array->buckets = calloc(capacity, sizeof(Node *));
-    if (!table->array->buckets)
-    {
-        free(table->array);
-        free(table);
-        return NULL;
-    }
-
-    table->array->capacity = capacity;
     table->size = 0;
-
     return table;
 }
 
-static void free_node(Node *node)
-{
-    free(node->key);
-    if (node->type == TYPE_STRING)
-    {
-        free(node->value);
-    }
-    // TYPE_LIST : la libération de la DoubleLinkedList revient au
-    // module du Membre 4 (double_linked_list_destroy), à brancher
-    // ici après intégration.
-    free(node);
-}
-
+/* ─────────────────────────────────────────────────────────────
+ *  Destruction de la HashTable
+ *  Libère tous les maillons de chaque bucket
+ * ───────────────────────────────────────────────────────────── */
 void hashtable_destroy(HashTable *table)
 {
     if (!table) return;
 
     for (size_t i = 0; i < table->array->capacity; i++)
     {
-        Node *current = table->array->buckets[i];
-        while (current)
+        /* linked_list_free libère toute la liste chaînée du bucket */
+        linked_list_free(table->array->buckets[i]);
+    }
+
+    dynamic_array_destroy(table->array);
+    free(table);
+}
+
+/* ─────────────────────────────────────────────────────────────
+ *  Recherche d'un nœud par clé — O(1) en moyenne
+ * ───────────────────────────────────────────────────────────── */
+Node *hashtable_find_node(HashTable *table, const char *key)
+{
+    size_t index = hash_index(key, table->array->capacity);
+    return linked_list_search(table->array->buckets[index], key);
+}
+
+/* ─────────────────────────────────────────────────────────────
+ *  Redimensionnement automatique du tableau
+ *  Déclenché quand le facteur de charge dépasse 0.7
+ * ───────────────────────────────────────────────────────────── */
+static void hashtable_resize_if_needed(HashTable *table)
+{
+    if (dynamic_array_load_factor(table->array) <= 0.7) return;
+
+    Node   **old_buckets;
+    size_t   old_capacity;
+
+    /* dynamic_array_resize double la capacité et retourne l'ancien tableau */
+    if (!dynamic_array_resize(table->array, &old_buckets, &old_capacity))
+        return;
+
+    /* Rehasher tous les anciens nœuds dans le nouveau tableau */
+    for (size_t i = 0; i < old_capacity; i++)
+    {
+        Node *current = old_buckets[i];
+        while (current != NULL)
         {
             Node *next = current->next;
-            free_node(current);
+
+            /* Calculer le nouvel index avec la nouvelle capacité */
+            size_t new_index = hash_index(current->key, table->array->capacity);
+
+            /* Réinsérer en tête du nouveau bucket */
+            current->next = table->array->buckets[new_index];
+            table->array->buckets[new_index] = current;
+            table->array->size++;
+
             current = next;
         }
     }
 
-    free(table->array->buckets);
-    free(table->array);
-    free(table);
+    /* Libérer l'ancien tableau de buckets (pas les Node, déjà déplacés) */
+    free(old_buckets);
 }
 
-/* ------------------------------------------------------------
- * Recherche d'un nœud par clé (parcours de la liste chaînée du bucket)
- * ------------------------------------------------------------ */
-
-Node *hashtable_find_node(HashTable *table, const char *key)
-{
-    size_t index = hash_index(key, table->array->capacity);
-    Node *current = table->array->buckets[index];
-
-    while (current)
-    {
-        if (strcmp(current->key, key) == 0)
-        {
-            return current;
-        }
-        current = current->next;
-    }
-
-    return NULL;
-}
-
-/* ------------------------------------------------------------
- * SET key value  -> O(1) en moyenne
- * ------------------------------------------------------------ */
-
+/* ─────────────────────────────────────────────────────────────
+ *  SET key value — O(1) en moyenne
+ *  Si la clé existe : met à jour la valeur
+ *  Sinon : crée un nouveau maillon en tête du bucket
+ * ───────────────────────────────────────────────────────────── */
 void hashtable_set(HashTable *table, const char *key, const char *value)
 {
     Node *existing = hashtable_find_node(table, key);
 
     if (existing)
     {
-        // Clé déjà présente : on remplace la valeur
+        /* Clé existante : mise à jour de la valeur */
         if (existing->type == TYPE_STRING)
-        {
             free(existing->value);
-        }
         existing->value = strdup(value);
-        existing->type = TYPE_STRING;
+        existing->type  = TYPE_STRING;
         return;
     }
 
-    // Nouvelle clé : on crée un maillon en tête de la liste du bucket
+    /* Nouvelle clé : insertion en tête du bucket */
     size_t index = hash_index(key, table->array->capacity);
-
-    Node *node = malloc(sizeof(Node));
-    node->key = strdup(key);
-    node->type = TYPE_STRING;
-    node->value = strdup(value);
-    node->next = table->array->buckets[index];
-
-    table->array->buckets[index] = node;
+    table->array->buckets[index] = linked_list_insert(
+        table->array->buckets[index], key, strdup(value), TYPE_STRING
+    );
+    table->array->size++;
     table->size++;
+
+    /* Redimensionner si nécessaire */
+    hashtable_resize_if_needed(table);
 }
 
-/* ------------------------------------------------------------
- * GET key -> O(1) en moyenne
- * ------------------------------------------------------------ */
-
+/* ─────────────────────────────────────────────────────────────
+ *  GET key — O(1) en moyenne
+ *  Retourne la valeur associée ou NULL si clé absente
+ * ───────────────────────────────────────────────────────────── */
 const char *hashtable_get(HashTable *table, const char *key)
 {
     Node *node = hashtable_find_node(table, key);
 
-    if (!node)
-    {
-        return NULL; // clé inexistante -> à gérer par l'interpréteur (Membre 5)
-    }
-
-    if (node->type != TYPE_STRING)
-    {
-        return NULL; // mauvais type -> erreur à remonter par l'interpréteur
-    }
+    if (!node)             return NULL;   /* clé inexistante  */
+    if (node->type != TYPE_STRING) return NULL;   /* mauvais type     */
 
     return (const char *)node->value;
 }
 
-/* ------------------------------------------------------------
- * DEL key -> O(1) en moyenne, retourne 1 si supprimé, 0 sinon
- * ------------------------------------------------------------ */
-
+/* ─────────────────────────────────────────────────────────────
+ *  DEL key — O(1) en moyenne
+ *  Retourne 1 si supprimé, 0 si clé inexistante
+ * ───────────────────────────────────────────────────────────── */
 int hashtable_del(HashTable *table, const char *key)
 {
-    size_t index = hash_index(key, table->array->capacity);
-    Node *current = table->array->buckets[index];
-    Node *prev = NULL;
+    size_t index   = hash_index(key, table->array->capacity);
+    int    deleted = 0;
 
-    while (current)
+    table->array->buckets[index] = linked_list_delete(
+        table->array->buckets[index], key, &deleted
+    );
+
+    if (deleted)
     {
-        if (strcmp(current->key, key) == 0)
-        {
-            if (prev)
-            {
-                prev->next = current->next;
-            }
-            else
-            {
-                table->array->buckets[index] = current->next;
-            }
-
-            free_node(current);
-            table->size--;
-            return 1;
-        }
-
-        prev = current;
-        current = current->next;
+        table->array->size--;
+        table->size--;
     }
 
-    return 0; // clé inexistante
+    return deleted;
 }
