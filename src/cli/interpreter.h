@@ -4,6 +4,7 @@
 /* On inclut HashTable.h pour que interpreter.c
    connaisse le type HashTable et ses fonctions */
 #include "../core/HashTable.h"
+#include "../core/double_linked_list.h"
 
 /*
  * execute_command :
